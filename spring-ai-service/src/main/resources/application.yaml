@@ -3,11 +3,23 @@ spring:
     name: spring-ai
 
   ai:
+    # Both starters are on the classpath. Leave spring.ai.model.chat unset so
+    # Ollama and Google GenAI each register a chat model. The single
+    # auto-configured ChatClient.Builder cannot choose between them.
+    chat:
+      client:
+        enabled: false
     ollama:
       base-url: http://localhost:11434
       chat:
         options:
           model: qwen2.5-coder:7b
+
+    google:
+      genai:
+        api-key: ${GEMINI-API-KEY}
+        chat:
+          model: gemini-3.8-flash
 
 
 server:
