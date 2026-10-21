@@ -5,6 +5,7 @@ import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 
 
 @Service
@@ -45,5 +46,9 @@ public class GeminiAIService {
                     """.formatted(CLAIM_DETAILS, message))
                 .call()
                 .content();
+    }
+
+    public Flux<String> askToAIStream(String message) {
+        return chatClient.prompt(message).stream().content();
     }
 }
