@@ -1,10 +1,14 @@
 package com.demo.spring_ai.Service;
 
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.SafeGuardAdvisor;
+import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
 import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 @Service
 public class OrderSupportAIAssistantService {
@@ -25,6 +29,8 @@ public class OrderSupportAIAssistantService {
 
         return chatClient
                 .prompt()
+                .advisors(List.of(new SimpleLoggerAdvisor(),
+                        new SafeGuardAdvisor(List.of("password","otp", "cvv"),"Your request contains sensitive information. For your security, please remove passwords, OTPs, credentials, or other confidential details and try again.",1)))
                 .system(orderSystemTemplate)
                 .user(promptUserSpec ->
                         promptUserSpec.text(orderUserTemplate).param("customerName", customerName)

@@ -24,3 +24,12 @@ spring:
 
 server:
   port: 9091
+
+logging:
+  level:
+    org:
+      springframework:
+        ai:
+          chat:
+            client:
+              advisor: DEBUG
