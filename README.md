@@ -1,4 +1,4 @@
-# Spring AI, Ollama, Message Roles, Prompt Templates, and Prompt Injection
+# Spring AI
 
 A practical guide for this project using **Java 25**, **Spring Boot
 4.1.x**, and **Spring AI 2.0.1**.
@@ -521,3 +521,318 @@ another strategy to avoid being interpreted as placeholders.
 -   [ ] Test prompt-stuffing limits.
 -   [ ] Test direct and indirect prompt-injection attempts.
 -   [ ] Verify authorization and data filtering in the backend.
+
+
+## 16. Advisors
+
+Spring AI Advisors intercept a `ChatClient` request/response flow. They can add context, manage conversation history, retrieve relevant documents, log activity, or apply safety checks. Advisors can run for both normal and streaming requests, depending on the advisor implementation.
+
+### Why use an advisor?
+
+- Keep reusable AI behavior separate from business-service code.
+- Apply common checks to multiple prompts.
+- Add conversation memory or RAG context when required.
+- Observe or transform request/response data.
+- Apply additional guardrails before returning a response.
+
+### Register an advisor
+
+For Spring AI versions that provide `SafeGuardAdvisor`, register it as a default advisor when building the client. Confirm the constructor and package against the Spring AI 2.0.1 API available in your project, because advisor APIs can vary by release.
+
+```java
+import java.util.List;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.SafeGuardAdvisor;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class AIConfig {
+
+    @Bean
+    ChatClient chatClient(ChatClient.Builder builder) {
+        return builder
+                .defaultAdvisors(
+                        new SafeGuardAdvisor(
+                                List.of("password", "otp", "api key"),
+                                "I can't help with requests involving sensitive information.",
+                                1
+                        )
+                )
+                .build();
+    }
+}
+```
+
+The example illustrates the intended configuration pattern. If your IDE reports that `SafeGuardAdvisor` or this constructor is unavailable, check the exact Spring AI 2.0.1 class/API and adapt the import or constructor rather than changing Spring AI versions blindly.
+
+Use the advisor in a request:
+
+```java
+String response = chatClient.prompt()
+        .user("Explain how to reset an order password.")
+        .call()
+        .content();
+```
+
+### Important security notes
+
+- A keyword-based advisor is only a guardrail; it is not a complete security boundary.
+- A keyword match can produce false positives and false negatives.
+- Do not send passwords, OTPs, API keys, or other secrets to the model.
+- Validate and authorize requests in backend code before retrieving private data or invoking tools.
+- Test the advisor with normal questions, sensitive terms, misspellings, and prompt-injection attempts.
+- Advisor ordering matters. Earlier advisors can affect the prompt/context seen by later advisors.
+
+For conversation memory, use the relevant memory advisor and provide its required conversation ID on every request. For RAG, configure the appropriate retrieval advisor and ensure retrieved data is authorized for the current user.
+
+## 17. ChatOptions
+
+`ChatOptions` controls model-generation behavior, such as temperature and (where supported) token limits. Provider-specific options can expose additional settings. Not every option is supported by every model.
+
+### Configure options in `application.yml`
+
+```yaml
+spring:
+  ai:
+    model:
+      chat: ollama
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: qwen2.5-coder:7b
+          temperature: 0.2
+
+server:
+  port: 9091
+```
+
+- `model`: must match a model installed in Ollama.
+- `temperature`: lower values generally make output more predictable; higher values generally allow more variation.
+- Provider-specific option names and supported ranges should be checked against the provider documentation.
+
+### Override options for one request
+
+For Ollama-specific request options, use the provider's `OllamaChatOptions` API available in your Spring AI version:
+
+```java
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.ollama.api.OllamaChatOptions;
+import org.springframework.stereotype.Service;
+
+@Service
+public class OrderSupportAIAssistantService {
+
+    private final ChatClient chatClient;
+
+    public OrderSupportAIAssistantService(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
+
+    public String answerWithOptions(String question) {
+        return chatClient.prompt()
+                .user(question)
+                .options(OllamaChatOptions.builder()
+                        .temperature(0.2)
+                        .build())
+                .call()
+                .content();
+    }
+}
+```
+
+If the options builder differs in the exact 2.0.1 dependency resolved by Maven, use your IDE's completion/API documentation to confirm the method names. Keep provider-specific options aligned with the configured chat model.
+
+**Choosing a temperature:** for support or factual responses, start with a low value such as `0.0`–`0.3`. For creative generation, test a higher value. Temperature does not guarantee correctness or prevent prompt injection.
+
+## 18. Stream AI responses using SSE frames
+
+Streaming lets the client receive generated text incrementally instead of waiting for the complete answer. Spring AI's `ChatClient.stream().content()` returns a Reactor `Flux<String>`. A Spring WebFlux endpoint can expose those chunks as Server-Sent Events (SSE).
+
+### Add the WebFlux dependency
+
+Keep your existing Spring AI BOM and Ollama starter. Add WebFlux for reactive streaming:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-webflux</artifactId>
+</dependency>
+```
+
+Spring AI streaming uses the reactive stack. If you use both MVC and WebFlux starters, check Spring Boot's application-type selection and avoid mixing blocking and reactive flows unintentionally. For an SSE streaming endpoint, a WebFlux controller returning `Flux<ServerSentEvent<...>>` is a straightforward approach.
+
+### Service: return a stream of text chunks
+
+```java
+package com.demo.spring_ai.service;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.ollama.api.OllamaChatOptions;
+import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
+
+@Service
+public class OrderSupportAIAssistantService {
+
+    private final ChatClient chatClient;
+
+    public OrderSupportAIAssistantService(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
+
+    public Flux<String> streamAnswer(String question) {
+        return chatClient.prompt()
+                .user(question)
+                .options(OllamaChatOptions.builder()
+                        .temperature(0.2)
+                        .build())
+                .stream()
+                .content();
+    }
+}
+```
+
+If you already registered an advisor on the `ChatClient` bean, the request uses that configured advisor chain. Verify that any custom advisor you add supports streaming if it must run on streaming requests.
+
+### Controller: send named SSE frames
+
+```java
+package com.demo.spring_ai.controller;
+
+import com.demo.spring_ai.service.OrderSupportAIAssistantService;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Flux;
+
+@RestController
+public class OrderSupportAIController {
+
+    private final OrderSupportAIAssistantService assistantService;
+
+    public OrderSupportAIController(
+            OrderSupportAIAssistantService assistantService) {
+        this.assistantService = assistantService;
+    }
+
+    @GetMapping(
+            value = "/api/v1/ai/stream",
+            produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> streamAnswer(
+            @RequestParam String question) {
+
+        return assistantService.streamAnswer(question)
+                .map(token -> ServerSentEvent.<String>builder()
+                        .event("token")
+                        .data(token)
+                        .build())
+                .concatWithValues(
+                        ServerSentEvent.<String>builder()
+                                .event("complete")
+                                .data("[DONE]")
+                                .build());
+    }
+}
+```
+
+This endpoint sends frames with event names `token` and `complete`. A client can append each `token` event's data to the visible answer. The completion frame is an application-level signal; it is not part of the model's generated answer.
+
+For production, add suitable validation, authentication/authorization, request limits, timeouts, and error handling. Avoid exposing internal exception messages or stack traces to clients. If an exception occurs after the stream starts, the HTTP status may already have been sent, so consider mapping errors to a safe SSE `error` event and logging the underlying exception server-side.
+
+### Example SSE wire format
+
+SSE is a text protocol. Each frame is separated by a blank line:
+
+```text
+event: token
+data: Hello
+
+event: token
+data:  there
+
+event: token
+data: !
+
+event: complete
+data: [DONE]
+
+```
+
+A token event is a chunk of text, not necessarily a single model token or word. Chunk boundaries can vary.
+
+### Test with curl
+
+```bash
+curl -N --get \
+  --data-urlencode "question=Explain Spring AI in simple terms" \
+  http://localhost:9091/api/v1/ai/stream
+```
+
+`-N` disables curl's output buffering so frames appear as they arrive.
+
+### Consume SSE from a browser
+
+```javascript
+const source = new EventSource(
+  "/api/v1/ai/stream?question=" +
+  encodeURIComponent("Explain Spring AI in simple terms")
+);
+
+source.addEventListener("token", (event) => {
+  document.querySelector("#answer").textContent += event.data;
+});
+
+source.addEventListener("complete", () => {
+  source.close();
+});
+
+source.onerror = () => {
+  source.close();
+};
+```
+
+`EventSource` uses GET requests and does not provide a built-in way to send a JSON request body or arbitrary authorization headers. For POST-based chat requests or custom headers, use `fetch()` and read the response stream, or use an authenticated same-origin session.
+
+### SSE frame fields
+
+| Field | Meaning |
+|---|---|
+| `event` | Names the event, such as `token`, `complete`, or `error`. |
+| `data` | Payload associated with the event. |
+| `id` | Optional event identifier, useful for reconnection strategies. |
+| `retry` | Optional reconnection delay in milliseconds. |
+
+### Streaming checklist
+
+- Confirm that the model is installed and Ollama is reachable.
+- Confirm the endpoint produces `text/event-stream`.
+- Use `curl -N` to observe chunks without client buffering.
+- Keep each SSE frame separated by a blank line.
+- Handle stream completion and errors on the client.
+- Do not treat streamed output as trusted instructions or execute it directly.
+- Add cancellation/timeouts and consider reverse-proxy buffering settings in deployment.
+
+## 19. Official references
+
+- [Spring AI Chat Client API](https://docs.spring.io/spring-ai/reference/api/chatclient.html)
+- [Spring AI Advisors API](https://docs.spring.io/spring-ai/reference/api/advisors.html)
+- [Spring AI Ollama Chat](https://docs.spring.io/spring-ai/reference/api/chat/ollama-chat.html)
+- [Spring WebFlux documentation](https://docs.spring.io/spring-framework/reference/web/webflux.html)
+- [Server-Sent Events (MDN)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
+
+## 20. Updated learning checklist
+
+- [ ] Run Ollama in Docker and verify the installed model.
+- [ ] Understand system, user, assistant, and tool roles.
+- [ ] Load `.st` prompt templates and render variables.
+- [ ] Register and test a Spring AI Advisor.
+- [ ] Configure model `ChatOptions` and request-level overrides.
+- [ ] Expose a streaming endpoint using `Flux<String>`.
+- [ ] Send and consume SSE `token` and `complete` frames.
+- [ ] Test prompt stuffing and direct/indirect prompt injection.
+- [ ] Enforce authorization and data filtering in backend code.
